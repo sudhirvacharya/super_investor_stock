@@ -2,7 +2,8 @@
 ╔══════════════════════════════════════════════════════════════════════╗
 ║        SUPERSTAR INVESTOR PORTFOLIO SCRAPER — FULL INTELLIGENCE      ║
 ║  Features: auto-discovery, conviction scoring, buy/sell signals,     ║
-║  investor clustering, retry logic, Excel multi-sheet export          ║
+║  top-10 picker, investor clustering, retry logic, HTML dashboard     ║
+║  Output: <date><time>_Report.html  e.g. 20Apr2026_1433_Report.html  ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -28,11 +29,11 @@ except ImportError:
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════
 INDEX_URL   = "https://trendlyne.com/portfolio/superstar-shareholders/index/individual/"
-OUTPUT_HTML = "superstar_analysis.html"
 OUTPUT_JSON = "superstar_raw.json"
-MIN_DELAY   = 2.5   # seconds between requests
+MIN_DELAY   = 2.5
 MAX_DELAY   = 4.5
 RETRIES     = 3
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TIER 1 — AUTO-DISCOVER ALL INVESTOR URLS FROM INDEX PAGE
@@ -82,8 +83,8 @@ def get_portfolio(page, url, name):
     if not safe_goto(page, url):
         return []
 
-    soup  = BeautifulSoup(page.content(), "html.parser")
-    rows  = soup.select("table tbody tr")
+    soup   = BeautifulSoup(page.content(), "html.parser")
+    rows   = soup.select("table tbody tr")
     stocks = []
 
     for row in rows:
@@ -91,19 +92,16 @@ def get_portfolio(page, url, name):
         if len(cols) < 3:
             continue
 
-        # Stock name — from td.stockName or first td
-        name_td = row.select_one("td.stockName") or cols[0]
+        name_td    = row.select_one("td.stockName") or cols[0]
         stock_name = name_td.get_text(strip=True)
         if not stock_name or stock_name.lower() in ("stock", "company", ""):
             continue
 
-        # Value (Cr), % of portfolio, qty change — positional
-        value_cr    = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-        pct_port    = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-        qty_change  = cols[3].get_text(strip=True) if len(cols) > 3 else ""
-        sector      = cols[4].get_text(strip=True) if len(cols) > 4 else ""
+        value_cr   = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+        pct_port   = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+        qty_change = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+        sector     = cols[4].get_text(strip=True) if len(cols) > 4 else ""
 
-        # Classify buy/sell/hold signal
         if qty_change.startswith("+") or qty_change.lower() == "new":
             signal = "BUY"
         elif qty_change.startswith("-"):
@@ -137,7 +135,7 @@ def build_master_df(all_holdings):
 def analyze(df):
     print("\n[STEP 3] Running analysis...")
 
-    # ── Conviction Score: how many superstars hold this stock ─────────
+    # ── Conviction Score ──────────────────────────────────────────────
     conviction = (
         df.groupby("stock")["investor"]
         .nunique()
@@ -150,8 +148,8 @@ def analyze(df):
         lambda s: ", ".join(df[df["stock"] == s]["investor"].unique().tolist())
     )
 
-    # ── Fresh Buy Signal: stocks being accumulated NOW ─────────────────
-    buys_df = df[df["signal"] == "BUY"]
+    # ── Fresh Buy Signal ──────────────────────────────────────────────
+    buys_df  = df[df["signal"] == "BUY"]
     new_buys = (
         buys_df.groupby("stock")["investor"]
         .apply(lambda x: ", ".join(x.unique()))
@@ -161,7 +159,7 @@ def analyze(df):
     new_buys["buyer_count"] = new_buys["buyers"].apply(lambda x: len(x.split(", ")))
     new_buys = new_buys.sort_values("buyer_count", ascending=False).reset_index(drop=True)
 
-    # ── Exit Signal: stocks being dumped ──────────────────────────────
+    # ── Exit Signal ───────────────────────────────────────────────────
     sells_df = df[df["signal"] == "SELL"]
     exits = (
         sells_df.groupby("stock")["investor"]
@@ -172,7 +170,7 @@ def analyze(df):
     exits["seller_count"] = exits["sellers"].apply(lambda x: len(x.split(", ")))
     exits = exits.sort_values("seller_count", ascending=False).reset_index(drop=True)
 
-    # ── Sector Preference across all superstars ────────────────────────
+    # ── Sector Preference ─────────────────────────────────────────────
     if "sector" in df.columns and df["sector"].str.strip().any():
         sector_pref = (
             df[df["sector"].str.strip() != ""]
@@ -186,6 +184,58 @@ def analyze(df):
         sector_pref = pd.DataFrame(columns=["sector", "stock_count"])
 
     return conviction, new_buys, exits, sector_pref
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TIER 3b — TOP 10 PICKER
+# ══════════════════════════════════════════════════════════════════════
+def pick_top10(conviction, new_buys, exits, df):
+    """
+    Pick 10 stocks from conviction_count > 3.
+    Priority order:
+      1. Highest conviction count  (weight x4)
+      2. Fresh BUY signal          (weight x2)
+      3. Sector diversification    (max 3 per sector)
+      4. Avoid recent SELLs        (penalty x1)
+    """
+    base = conviction[conviction["superstar_count"] > 3].copy()
+
+    if base.empty:
+        print("[WARN] No stocks with conviction > 3 found.")
+        return pd.DataFrame()
+
+    buy_map    = new_buys.set_index("stock")["buyer_count"].to_dict()
+    sell_map   = exits.set_index("stock")["seller_count"].to_dict()
+    sector_map = (
+        df.groupby("stock")["sector"]
+        .agg(lambda x: x.mode()[0] if not x.mode().empty else "Unknown")
+        .to_dict()
+    )
+
+    base["buyer_count"]  = base["stock"].map(buy_map).fillna(0)
+    base["seller_count"] = base["stock"].map(sell_map).fillna(0)
+    base["sector"]       = base["stock"].map(sector_map).fillna("Unknown")
+
+    # Composite score
+    base["score"] = (
+        base["superstar_count"] * 4   # priority 1 — conviction
+      + base["buyer_count"]     * 2   # priority 2 — fresh buys
+      - base["seller_count"]    * 1   # priority 4 — soft sell penalty
+    )
+    base = base.sort_values("score", ascending=False).reset_index(drop=True)
+
+    # Sector diversification guard — max 3 stocks per sector
+    selected, sector_counts = [], defaultdict(int)
+    for _, row in base.iterrows():
+        sec = row["sector"]
+        if sector_counts[sec] < 3:
+            selected.append(row)
+            sector_counts[sec] += 1
+        if len(selected) == 10:
+            break
+
+    cols = ["stock", "superstar_count", "buyer_count", "seller_count", "sector", "score", "investors_list"]
+    return pd.DataFrame(selected)[cols]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -212,35 +262,37 @@ def investor_similarity(df):
                 "similar_to":     peer,
                 "similarity_pct": round(score * 100, 1),
             })
-    result = pd.DataFrame(rows).sort_values(["investor", "similarity_pct"], ascending=[True, False])
+    result = pd.DataFrame(rows).sort_values(
+        ["investor", "similarity_pct"], ascending=[True, False]
+    )
     return result
 
 
 # ══════════════════════════════════════════════════════════════════════
 # TIER 5 — HTML DASHBOARD EXPORT
 # ══════════════════════════════════════════════════════════════════════
-def export_html(conviction, new_buys, exits, sector_pref, similarity_df, raw_df, filename=OUTPUT_HTML):
+def export_html(conviction, new_buys, exits, sector_pref, similarity_df, raw_df, top10_df, filename):
     import html as html_lib
-    from datetime import datetime
 
     def df_to_html_rows(df, signal_col=None, highlight_col=None):
         rows_html = ""
         for _, row in df.iterrows():
             cells = ""
             for col in df.columns:
-                val = str(row[col]) if row[col] is not None else ""
+                val         = str(row[col]) if row[col] is not None else ""
                 val_escaped = html_lib.escape(val)
-                cls = ""
+                cls         = ""
                 if signal_col and col == signal_col:
-                    if val == "BUY":   cls = ' class="sig-buy"'
+                    if val == "BUY":    cls = ' class="sig-buy"'
                     elif val == "SELL": cls = ' class="sig-sell"'
-                    else:              cls = ' class="sig-hold"'
+                    else:               cls = ' class="sig-hold"'
                 elif highlight_col and col == highlight_col:
                     try:
                         n = float(val)
                         if n >= 5:   cls = ' class="conv-high"'
                         elif n >= 3: cls = ' class="conv-mid"'
-                    except: pass
+                    except:
+                        pass
                 cells += f'<td{cls}>{val_escaped}</td>'
             rows_html += f"<tr>{cells}</tr>\n"
         return rows_html
@@ -265,34 +317,40 @@ def export_html(conviction, new_buys, exits, sector_pref, similarity_df, raw_df,
         </div>"""
 
     tabs = [
-        ("conviction", "🏆 Conviction",  conviction,    None,     "superstar_count"),
-        ("buys",       "🟢 Fresh Buys",  new_buys,      None,     "buyer_count"),
-        ("exits",      "🔴 Exits",       exits,         None,     "seller_count"),
-        ("sectors",    "📊 Sectors",     sector_pref,   None,     None),
-        ("clusters",   "🔗 Clusters",    similarity_df, None,     "similarity_pct"),
-        ("raw",        "📋 Raw Data",    raw_df,        "signal", None),
+        ("top10",      "⭐ Top 10 Picks", top10_df,      None,     "score"),
+        ("conviction", "🏆 Conviction",   conviction,    None,     "superstar_count"),
+        ("buys",       "🟢 Fresh Buys",   new_buys,      None,     "buyer_count"),
+        ("exits",      "🔴 Exits",        exits,         None,     "seller_count"),
+        ("sectors",    "📊 Sectors",      sector_pref,   None,     None),
+        ("clusters",   "🔗 Clusters",     similarity_df, None,     "similarity_pct"),
+        ("raw",        "📋 Raw Data",     raw_df,        "signal", None),
     ]
 
     tab_buttons  = ""
     tab_contents = ""
     first = True
-    for tid, label, df, sig_col, hl_col in tabs:
-        if df is None or df.empty:
+    for tid, label, df_tab, sig_col, hl_col in tabs:
+        if df_tab is None or df_tab.empty:
             continue
-        active = "active" if first else ""
-        tab_buttons  += f'<button class="tab-btn {active}" onclick="showTab(\'{tid}\')" id="btn-{tid}">{label} <span class="badge">{len(df)}</span></button>\n'
-        content       = make_table(tid, df, signal_col=sig_col, highlight_col=hl_col)
+        active        = "active" if first else ""
+        tab_buttons  += (
+            f'<button class="tab-btn {active}" onclick="showTab(\'{tid}\')" id="btn-{tid}">'
+            f'{label} <span class="badge">{len(df_tab)}</span></button>\n'
+        )
+        content = make_table(tid, df_tab, signal_col=sig_col, highlight_col=hl_col)
         if not first:
             content = content.replace(f'id="tab-{tid}"', f'id="tab-{tid}" style="display:none"')
         tab_contents += content
         first = False
+
+    now_str = datetime.now().strftime('%d %b %Y %H:%M')
 
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Superstar Investor Dashboard</title>
+<title>Superstar Investor Dashboard — {now_str}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap');
   :root {{
@@ -346,7 +404,8 @@ def export_html(conviction, new_buys, exits, sector_pref, similarity_df, raw_df,
     <div class="meta-pill"><span>Unique Stocks</span>{raw_df['stock'].nunique()}</div>
     <div class="meta-pill"><span>Fresh Buys</span>{len(new_buys)}</div>
     <div class="meta-pill"><span>Exits</span>{len(exits)}</div>
-    <div class="meta-pill"><span>Generated</span>{datetime.now().strftime('%d %b %Y %H:%M')}</div>
+    <div class="meta-pill"><span>Generated</span>{now_str}</div>
+    <div class="meta-pill"><span>File</span>{filename}</div>
   </div>
 </div>
 <div class="tabs">
@@ -397,10 +456,13 @@ function sortTable(th) {{
 # MAIN
 # ══════════════════════════════════════════════════════════════════════
 def main():
-    start_time = datetime.now()
+    start_time  = datetime.now()
+    output_html = start_time.strftime("%d%b%Y_%H%M") + "_Report.html"
+
     print("=" * 60)
     print("  SUPERSTAR INVESTOR SCRAPER")
-    print(f"  Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Started : {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Output  : {output_html}")
     print("=" * 60)
 
     all_holdings = {}
@@ -419,25 +481,25 @@ def main():
         # ── Step 1: Auto-discover investors ───────────────────────────
         investors = scrape_investor_index(page)
 
-        # Fallback: use hardcoded list if index scrape fails
+        # Fallback hardcoded list if index scrape fails
         if not investors:
             print("[WARN] Index scrape returned 0 investors. Using fallback list.")
             investors = {
-                "Dolly Khanna":      "https://trendlyne.com/portfolio/superstar-shareholders/53757/latest/dolly-khanna-portfolio/",
-                "Ashish Kacholia":   "https://trendlyne.com/portfolio/superstar-shareholders/53746/latest/ashish-kacholia-portfolio/",
-                "Vijay Kedia":       "https://trendlyne.com/portfolio/superstar-shareholders/53805/latest/vijay-kishanlal-kedia-portfolio/",
+                "Dolly Khanna":        "https://trendlyne.com/portfolio/superstar-shareholders/53757/latest/dolly-khanna-portfolio/",
+                "Ashish Kacholia":     "https://trendlyne.com/portfolio/superstar-shareholders/53746/latest/ashish-kacholia-portfolio/",
+                "Vijay Kedia":         "https://trendlyne.com/portfolio/superstar-shareholders/53805/latest/vijay-kishanlal-kedia-portfolio/",
                 "Rakesh Jhunjhunwala": "https://trendlyne.com/portfolio/superstar-shareholders/53781/latest/rakesh-jhunjhunwala-and-associates-portfolio/",
-                "Rekha Jhunjhunwala": "https://trendlyne.com/portfolio/superstar-shareholders/53782/latest/rekha-jhunjhunwala-portfolio/",
-                "Porinju Veliyath":  "https://trendlyne.com/portfolio/superstar-shareholders/53777/latest/porinju-v-veliyath-portfolio/",
-                "Sunil Singhania":   "https://trendlyne.com/portfolio/superstar-shareholders/182955/latest/sunil-singhania-portfolio/",
-                "Mukul Agrawal":     "https://trendlyne.com/portfolio/superstar-shareholders/53774/latest/mukul-agrawal-portfolio/",
-                "Radhakishan Damani": "https://trendlyne.com/portfolio/superstar-shareholders/178317/latest/radhakishan-damani-portfolio/",
-                "Madhusudan Kela":   "https://trendlyne.com/portfolio/superstar-shareholders/584325/latest/madhusudan-kela-portfolio/",
-                "Anil Kumar Goel":   "https://trendlyne.com/portfolio/superstar-shareholders/53743/latest/anil-kumar-goel-and-associates-portfolio/",
-                "Mohnish Pabrai":    "https://trendlyne.com/portfolio/superstar-shareholders/69664/latest/mohnish-pabrai-portfolio/",
-                "Nemish S Shah":     "https://trendlyne.com/portfolio/superstar-shareholders/53776/latest/nemish-s-shah-portfolio/",
-                "Akash Bhanshali":   "https://trendlyne.com/portfolio/superstar-shareholders/53740/latest/akash-bhanshali-portfolio/",
-                "Satpal Khattar":    "https://trendlyne.com/portfolio/superstar-shareholders/53793/latest/satpal-khattar-portfolio/",
+                "Rekha Jhunjhunwala":  "https://trendlyne.com/portfolio/superstar-shareholders/53782/latest/rekha-jhunjhunwala-portfolio/",
+                "Porinju Veliyath":    "https://trendlyne.com/portfolio/superstar-shareholders/53777/latest/porinju-v-veliyath-portfolio/",
+                "Sunil Singhania":     "https://trendlyne.com/portfolio/superstar-shareholders/182955/latest/sunil-singhania-portfolio/",
+                "Mukul Agrawal":       "https://trendlyne.com/portfolio/superstar-shareholders/53774/latest/mukul-agrawal-portfolio/",
+                "Radhakishan Damani":  "https://trendlyne.com/portfolio/superstar-shareholders/178317/latest/radhakishan-damani-portfolio/",
+                "Madhusudan Kela":     "https://trendlyne.com/portfolio/superstar-shareholders/584325/latest/madhusudan-kela-portfolio/",
+                "Anil Kumar Goel":     "https://trendlyne.com/portfolio/superstar-shareholders/53743/latest/anil-kumar-goel-and-associates-portfolio/",
+                "Mohnish Pabrai":      "https://trendlyne.com/portfolio/superstar-shareholders/69664/latest/mohnish-pabrai-portfolio/",
+                "Nemish S Shah":       "https://trendlyne.com/portfolio/superstar-shareholders/53776/latest/nemish-s-shah-portfolio/",
+                "Akash Bhanshali":     "https://trendlyne.com/portfolio/superstar-shareholders/53740/latest/akash-bhanshali-portfolio/",
+                "Satpal Khattar":      "https://trendlyne.com/portfolio/superstar-shareholders/53793/latest/satpal-khattar-portfolio/",
             }
 
         # ── Step 2: Scrape each investor's portfolio ───────────────────
@@ -452,57 +514,70 @@ def main():
 
         browser.close()
 
-    # ── Save raw JSON (resume without re-scraping next time) ──────────
+    # ── Save raw JSON ──────────────────────────────────────────────────
     with open(OUTPUT_JSON, "w") as f:
         json.dump(all_holdings, f, indent=2)
     print(f"\n  -> Raw data saved: {OUTPUT_JSON}")
 
-    # ── Step 3: Build master DataFrame ────────────────────────────────
+    # ── Build master DataFrame ─────────────────────────────────────────
     df = build_master_df(all_holdings)
     if df.empty:
         print("[ERROR] No data scraped. Check selectors or site structure.")
         return
 
-    # ── Step 3: Analysis ──────────────────────────────────────────────
+    # ── Analysis ───────────────────────────────────────────────────────
     conviction, new_buys, exits, sector_pref = analyze(df)
 
-    # ── Print top results to console ──────────────────────────────────
-    print("\n── TOP 20 CONVICTION STOCKS (held by most superstars) ──")
+    # ── Top 10 Picker ──────────────────────────────────────────────────
+    top10 = pick_top10(conviction, new_buys, exits, df)
+
+    # ── Print results to console ───────────────────────────────────────
+    print("\n── TOP 10 PICKS (scored) ──")
+    if not top10.empty:
+        print(top10.to_string(index=False))
+
+    print("\n── TOP 20 CONVICTION STOCKS ──")
     print(conviction.head(20).to_string(index=False))
 
-    print("\n── TOP 10 FRESH BUYS (being accumulated now) ──")
+    print("\n── TOP 10 FRESH BUYS ──")
     print(new_buys.head(10).to_string(index=False))
 
-    print("\n── TOP 10 EXITS (being sold now) ──")
+    print("\n── TOP 10 EXITS ──")
     print(exits.head(10).to_string(index=False))
 
-    # ── Step 4: Clustering ────────────────────────────────────────────
+    # ── Clustering ─────────────────────────────────────────────────────
     similarity_df = investor_similarity(df)
     if not similarity_df.empty:
         print("\n── INVESTOR SIMILARITY (top pairs) ──")
         print(similarity_df.head(15).to_string(index=False))
 
-    # ── Step 5: Export ────────────────────────────────────────────────
-    export_html(conviction, new_buys, exits, sector_pref, similarity_df, df)
+    # ── Export HTML dashboard ──────────────────────────────────────────
+    export_html(conviction, new_buys, exits, sector_pref, similarity_df, df, top10, filename=output_html)
 
     elapsed = (datetime.now() - start_time).seconds
     print(f"\n{'='*60}")
     print(f"  DONE in {elapsed}s | "
           f"{len(investors)} investors | "
           f"{df['stock'].nunique()} unique stocks")
+    print(f"  Report  : {output_html}")
     print(f"{'='*60}")
 
 
 if __name__ == "__main__":
     # ── Optional: load from JSON cache to skip re-scraping ────────────
-    USE_CACHE = False  # set True to reload from superstar_raw.json
+    # Set USE_CACHE = True to reload from superstar_raw.json
+    # and regenerate the HTML without scraping again.
+    USE_CACHE = False
     if USE_CACHE and os.path.exists(OUTPUT_JSON):
         print(f"[CACHE] Loading from {OUTPUT_JSON}...")
+        output_html = datetime.now().strftime("%d%b%Y_%H%M") + "_Report.html"
         with open(OUTPUT_JSON) as f:
             all_holdings = json.load(f)
-        df = build_master_df(all_holdings)
+        df            = build_master_df(all_holdings)
         conviction, new_buys, exits, sector_pref = analyze(df)
+        top10         = pick_top10(conviction, new_buys, exits, df)
         similarity_df = investor_similarity(df)
-        export_html(conviction, new_buys, exits, sector_pref, similarity_df, df)
+        export_html(conviction, new_buys, exits, sector_pref, similarity_df, df, top10, filename=output_html)
+        print(f"  -> Report saved: {output_html}")
     else:
         main()

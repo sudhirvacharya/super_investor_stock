@@ -35,6 +35,14 @@
       "sector": "New"
     },
     {
+      "stock": "3M",
+      "value_cr": "3M",
+      "pct_port": "523.6 Cr",
+      "qty_change": "166,700",
+      "signal": "HOLD",
+      "sector": "0.0"
+    },
+    {
       "stock": "Aptech",
       "value_cr": "Aptech",
       "pct_port": "16.2 Cr",
@@ -81,14 +89,6 @@
       "qty_change": "4,306,487",
       "signal": "HOLD",
       "sector": "0.0"
-    },
-    {
-      "stock": "3M",
-      "value_cr": "3M",
-      "pct_port": "523.6 Cr",
-      "qty_change": "166,700",
-      "signal": "HOLD",
-      "sector": "Filing Awaited"
     },
     {
       "stock": "Advani Hotels",
@@ -138,7 +138,7 @@
       "pct_port": "155,467.3 Cr",
       "qty_change": "7,609,010,236",
       "signal": "HOLD",
-      "sector": "Filing Awaited"
+      "sector": "0.0"
     }
   ],
   "Rakesh Jhunjhunwala and Associates": [
@@ -5711,6 +5711,14 @@
       "sector": "0.0"
     },
     {
+      "stock": "KMF Builders",
+      "value_cr": "KMF Builders",
+      "pct_port": "48.4 L",
+      "qty_change": "604,000",
+      "signal": "HOLD",
+      "sector": "0.0"
+    },
+    {
       "stock": "Beeyu Overseas",
       "value_cr": "Beeyu Overseas",
       "pct_port": "19.7 L",
@@ -5843,14 +5851,6 @@
       "value_cr": "Shriram Asset",
       "pct_port": "6.9 Cr",
       "qty_change": "209,332",
-      "signal": "HOLD",
-      "sector": "Filing Awaited"
-    },
-    {
-      "stock": "KMF Builders",
-      "value_cr": "KMF Builders",
-      "pct_port": "48.4 L",
-      "qty_change": "604,000",
       "signal": "HOLD",
       "sector": "Filing Awaited"
     },
@@ -7619,14 +7619,6 @@
       "sector": "Filing Awaited"
     },
     {
-      "stock": "Ritesh International",
-      "value_cr": "Ritesh International",
-      "pct_port": "-",
-      "qty_change": "-",
-      "signal": "SELL",
-      "sector": "Filing Awaited"
-    },
-    {
       "stock": "Virat Crane",
       "value_cr": "Virat Crane",
       "pct_port": "-",
@@ -7797,6 +7789,14 @@
     {
       "stock": "RIR Power Electronics",
       "value_cr": "RIR Power Electronics",
+      "pct_port": "-",
+      "qty_change": "-",
+      "signal": "SELL",
+      "sector": "-"
+    },
+    {
+      "stock": "Ritesh International",
+      "value_cr": "Ritesh International",
       "pct_port": "-",
       "qty_change": "-",
       "signal": "SELL",
@@ -9825,6 +9825,14 @@
       "sector": "0.0"
     },
     {
+      "stock": "BLB",
+      "value_cr": "BLB",
+      "pct_port": "99.9 L",
+      "qty_change": "583,339",
+      "signal": "HOLD",
+      "sector": "0.0"
+    },
+    {
       "stock": "Cyber Media",
       "value_cr": "Cyber Media",
       "pct_port": "37.0 L",
@@ -10565,14 +10573,6 @@
       "value_cr": "Advance Metering",
       "pct_port": "48.4 L",
       "qty_change": "240,016",
-      "signal": "HOLD",
-      "sector": "Filing Awaited"
-    },
-    {
-      "stock": "BLB",
-      "value_cr": "BLB",
-      "pct_port": "94.7 L",
-      "qty_change": "553,126",
       "signal": "HOLD",
       "sector": "Filing Awaited"
     },
@@ -11609,14 +11609,6 @@
       "sector": "Filing Awaited"
     },
     {
-      "stock": "Ritesh International",
-      "value_cr": "Ritesh International",
-      "pct_port": "-",
-      "qty_change": "-",
-      "signal": "SELL",
-      "sector": "Filing Awaited"
-    },
-    {
       "stock": "Virat Crane",
       "value_cr": "Virat Crane",
       "pct_port": "-",
@@ -11739,6 +11731,14 @@
     {
       "stock": "Trans Freight Containers",
       "value_cr": "Trans Freight Containers",
+      "pct_port": "-",
+      "qty_change": "-",
+      "signal": "SELL",
+      "sector": "-"
+    },
+    {
+      "stock": "Ritesh International",
+      "value_cr": "Ritesh International",
       "pct_port": "-",
       "qty_change": "-",
       "signal": "SELL",
