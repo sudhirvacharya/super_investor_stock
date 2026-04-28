@@ -3,6 +3,7 @@
 ║        SUPERSTAR INVESTOR PORTFOLIO SCRAPER — FULL INTELLIGENCE      ║
 ║  Features: auto-discovery, conviction scoring, buy/sell signals,     ║
 ║  top-10 picker, investor clustering, retry logic, HTML dashboard     ║
+║  Filters: D/E < 1.5x + promoter holding stable/up (no sector cap)   ║
 ║  Output: <date><time>_Report.html  e.g. 20Apr2026_1433_Report.html  ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
@@ -122,6 +123,104 @@ def get_portfolio(page, url, name):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# TIER 2b — FETCH FUNDAMENTALS: D/E RATIO + PROMOTER HOLDING TREND
+# ══════════════════════════════════════════════════════════════════════
+def get_fundamentals(page, stock_name):
+    """
+    For a given stock, fetch from Trendlyne:
+      - debt_to_equity  (float, e.g. 0.8)
+      - promoter_trend  ("up" | "stable" | "down")
+
+    Hits Trendlyne balance sheet + shareholding pages per stock.
+    Returns dict or None if fetch fails.
+    """
+    slug = stock_name.lower().replace(" ", "-").replace("&", "and")
+    # Remove special characters that would break URL
+    slug = "".join(c for c in slug if c.isalnum() or c == "-")
+
+    url = f"https://trendlyne.com/equity/{slug}/financials/balance-sheet/"
+    print(f"    [FUNDAMENTALS] {stock_name} -> {url}")
+
+    if not safe_goto(page, url):
+        return None
+
+    soup = BeautifulSoup(page.content(), "html.parser")
+
+    # ── Debt-to-Equity ────────────────────────────────────────────────
+    de_ratio = None
+    for tag in soup.find_all(string=lambda t: t and "debt to equity" in t.lower()):
+        parent  = tag.find_parent()
+        sibling = parent.find_next_sibling() if parent else None
+        if sibling:
+            try:
+                de_ratio = float(sibling.get_text(strip=True).replace(",", ""))
+                break
+            except ValueError:
+                pass
+
+    # Fallback: look for ratio in any table cell adjacent to D/E label
+    if de_ratio is None:
+        for row in soup.select("table tr"):
+            cells = row.select("td, th")
+            for i, cell in enumerate(cells):
+                if "debt to equity" in cell.get_text(strip=True).lower():
+                    for j in range(i + 1, min(i + 4, len(cells))):
+                        try:
+                            de_ratio = float(
+                                cells[j].get_text(strip=True)
+                                .replace(",", "")
+                                .replace("%", "")
+                            )
+                            break
+                        except ValueError:
+                            pass
+                    break
+
+    # ── Promoter Holding Trend ────────────────────────────────────────
+    # Load shareholding page separately
+    sh_url = f"https://trendlyne.com/equity/{slug}/shareholding/"
+    promoter_trend = "stable"
+
+    if safe_goto(page, sh_url):
+        sh_soup = BeautifulSoup(page.content(), "html.parser")
+        try:
+            for table in sh_soup.select("table"):
+                headers = [th.get_text(strip=True).lower() for th in table.select("th")]
+                if any("promoter" in h for h in headers):
+                    for row in table.select("tbody tr"):
+                        cells = row.select("td")
+                        if cells and "promoter" in cells[0].get_text(strip=True).lower():
+                            values = []
+                            for cell in cells[1:3]:   # compare latest 2 quarters
+                                try:
+                                    values.append(
+                                        float(
+                                            cell.get_text(strip=True)
+                                            .replace("%", "")
+                                            .replace(",", "")
+                                        )
+                                    )
+                                except ValueError:
+                                    pass
+                            if len(values) == 2:
+                                diff = values[0] - values[1]
+                                if diff > 0.5:
+                                    promoter_trend = "up"
+                                elif diff < -0.5:
+                                    promoter_trend = "down"
+                                else:
+                                    promoter_trend = "stable"
+                            break
+        except Exception:
+            pass
+
+    return {
+        "debt_to_equity": de_ratio,
+        "promoter_trend": promoter_trend,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # TIER 3 — SMART ANALYSIS
 # ══════════════════════════════════════════════════════════════════════
 def build_master_df(all_holdings):
@@ -187,16 +286,21 @@ def analyze(df):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# TIER 3b — TOP 10 PICKER
+# TIER 3b — TOP 10 PICKER (fundamentals-gated, no sector cap)
 # ══════════════════════════════════════════════════════════════════════
-def pick_top10(conviction, new_buys, exits, df):
+def pick_top10(conviction, new_buys, exits, df, page):
     """
     Pick 10 stocks from conviction_count > 3.
-    Priority order:
+
+    HARD FILTERS (applied before scoring — failures are dropped):
+      F1. Promoter holding trend must be 'up' or 'stable' (not 'down')
+      F2. Debt-to-equity < 1.5x
+          (stocks where D/E data unavailable are kept with a warning)
+
+    Scoring (survivors only):
       1. Highest conviction count  (weight x4)
       2. Fresh BUY signal          (weight x2)
-      3. Sector diversification    (max 3 per sector)
-      4. Avoid recent SELLs        (penalty x1)
+      3. Avoid recent SELLs        (penalty x1)
     """
     base = conviction[conviction["superstar_count"] > 3].copy()
 
@@ -204,38 +308,73 @@ def pick_top10(conviction, new_buys, exits, df):
         print("[WARN] No stocks with conviction > 3 found.")
         return pd.DataFrame()
 
-    buy_map    = new_buys.set_index("stock")["buyer_count"].to_dict()
-    sell_map   = exits.set_index("stock")["seller_count"].to_dict()
-    sector_map = (
-        df.groupby("stock")["sector"]
-        .agg(lambda x: x.mode()[0] if not x.mode().empty else "Unknown")
-        .to_dict()
+    buy_map  = new_buys.set_index("stock")["buyer_count"].to_dict()
+    sell_map = exits.set_index("stock")["seller_count"].to_dict()
+
+    # ── Fetch fundamentals for each candidate ─────────────────────────
+    print(f"\n[STEP 3b] Fetching fundamentals for {len(base)} candidates...")
+    fund_cache = {}
+    for stock in base["stock"].tolist():
+        fund_cache[stock] = get_fundamentals(page, stock)
+
+    # ── Apply hard filters ────────────────────────────────────────────
+    def passes_filters(stock):
+        f  = fund_cache.get(stock)
+        if f is None:
+            print(f"    [SKIP] {stock} — fundamentals fetch failed")
+            return False
+
+        de = f.get("debt_to_equity")
+        pt = f.get("promoter_trend", "stable")
+
+        # F1: promoter trend
+        if pt == "down":
+            print(f"    [FILTER-F1] {stock} — promoter holding declining")
+            return False
+
+        # F2: D/E ratio (None = data unavailable → keep with warning)
+        if de is not None and de >= 1.5:
+            print(f"    [FILTER-F2] {stock} — D/E {de:.2f} >= 1.5x, dropped")
+            return False
+
+        if de is None:
+            print(f"    [WARN] {stock} — D/E data unavailable, keeping")
+
+        return True
+
+    base["passes"] = base["stock"].apply(passes_filters)
+    filtered = base[base["passes"]].copy()
+
+    print(f"\n  -> {len(filtered)} stocks passed filters "
+          f"(dropped {len(base) - len(filtered)})")
+
+    if filtered.empty:
+        print("[WARN] No stocks passed fundamental filters.")
+        return pd.DataFrame()
+
+    # ── Attach fundamentals columns ───────────────────────────────────
+    filtered["debt_to_equity"] = filtered["stock"].map(
+        lambda s: fund_cache[s].get("debt_to_equity") if fund_cache.get(s) else None
+    )
+    filtered["promoter_trend"] = filtered["stock"].map(
+        lambda s: fund_cache[s].get("promoter_trend", "stable") if fund_cache.get(s) else "stable"
     )
 
-    base["buyer_count"]  = base["stock"].map(buy_map).fillna(0)
-    base["seller_count"] = base["stock"].map(sell_map).fillna(0)
-    base["sector"]       = base["stock"].map(sector_map).fillna("Unknown")
-
-    # Composite score
-    base["score"] = (
-        base["superstar_count"] * 4   # priority 1 — conviction
-      + base["buyer_count"]     * 2   # priority 2 — fresh buys
-      - base["seller_count"]    * 1   # priority 4 — soft sell penalty
+    # ── Score ─────────────────────────────────────────────────────────
+    filtered["buyer_count"]  = filtered["stock"].map(buy_map).fillna(0)
+    filtered["seller_count"] = filtered["stock"].map(sell_map).fillna(0)
+    filtered["score"] = (
+        filtered["superstar_count"] * 4
+      + filtered["buyer_count"]     * 2
+      - filtered["seller_count"]    * 1
     )
-    base = base.sort_values("score", ascending=False).reset_index(drop=True)
+    filtered = filtered.sort_values("score", ascending=False).head(10).reset_index(drop=True)
 
-    # Sector diversification guard — max 3 stocks per sector
-    selected, sector_counts = [], defaultdict(int)
-    for _, row in base.iterrows():
-        sec = row["sector"]
-        if sector_counts[sec] < 3:
-            selected.append(row)
-            sector_counts[sec] += 1
-        if len(selected) == 10:
-            break
-
-    cols = ["stock", "superstar_count", "buyer_count", "seller_count", "sector", "score", "investors_list"]
-    return pd.DataFrame(selected)[cols]
+    cols = [
+        "stock", "superstar_count", "buyer_count", "seller_count",
+        "debt_to_equity", "promoter_trend", "score", "investors_list",
+    ]
+    return filtered[cols]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -291,7 +430,7 @@ def export_html(conviction, new_buys, exits, sector_pref, similarity_df, raw_df,
                         n = float(val)
                         if n >= 5:   cls = ' class="conv-high"'
                         elif n >= 3: cls = ' class="conv-mid"'
-                    except:
+                    except Exception:
                         pass
                 cells += f'<td{cls}>{val_escaped}</td>'
             rows_html += f"<tr>{cells}</tr>\n"
@@ -466,6 +605,13 @@ def main():
     print("=" * 60)
 
     all_holdings = {}
+    df           = pd.DataFrame()
+    conviction   = pd.DataFrame()
+    new_buys     = pd.DataFrame()
+    exits        = pd.DataFrame()
+    sector_pref  = pd.DataFrame()
+    top10        = pd.DataFrame()
+    similarity_df = pd.DataFrame()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -481,7 +627,6 @@ def main():
         # ── Step 1: Auto-discover investors ───────────────────────────
         investors = scrape_investor_index(page)
 
-        # Fallback hardcoded list if index scrape fails
         if not investors:
             print("[WARN] Index scrape returned 0 investors. Using fallback list.")
             investors = {
@@ -512,27 +657,33 @@ def main():
                   f"Buys: {sum(1 for s in stocks if s['signal']=='BUY')} | "
                   f"Sells: {sum(1 for s in stocks if s['signal']=='SELL')}")
 
+        # ── Save raw JSON ──────────────────────────────────────────────
+        with open(OUTPUT_JSON, "w") as f:
+            json.dump(all_holdings, f, indent=2)
+        print(f"\n  -> Raw data saved: {OUTPUT_JSON}")
+
+        # ── Build master DataFrame ─────────────────────────────────────
+        df = build_master_df(all_holdings)
+
+        if df.empty:
+            print("[ERROR] No data scraped. Check selectors or site structure.")
+            browser.close()
+            return
+
+        # ── Analysis ───────────────────────────────────────────────────
+        conviction, new_buys, exits, sector_pref = analyze(df)
+
+        # ── Top 10 Picker — runs INSIDE browser context ────────────────
+        # page must still be alive for get_fundamentals() fetches
+        top10 = pick_top10(conviction, new_buys, exits, df, page)
+
+        # ── Clustering ─────────────────────────────────────────────────
+        similarity_df = investor_similarity(df)
+
         browser.close()
 
-    # ── Save raw JSON ──────────────────────────────────────────────────
-    with open(OUTPUT_JSON, "w") as f:
-        json.dump(all_holdings, f, indent=2)
-    print(f"\n  -> Raw data saved: {OUTPUT_JSON}")
-
-    # ── Build master DataFrame ─────────────────────────────────────────
-    df = build_master_df(all_holdings)
-    if df.empty:
-        print("[ERROR] No data scraped. Check selectors or site structure.")
-        return
-
-    # ── Analysis ───────────────────────────────────────────────────────
-    conviction, new_buys, exits, sector_pref = analyze(df)
-
-    # ── Top 10 Picker ──────────────────────────────────────────────────
-    top10 = pick_top10(conviction, new_buys, exits, df)
-
     # ── Print results to console ───────────────────────────────────────
-    print("\n── TOP 10 PICKS (scored) ──")
+    print("\n── TOP 10 PICKS (scored + fundamentals-filtered) ──")
     if not top10.empty:
         print(top10.to_string(index=False))
 
@@ -545,14 +696,16 @@ def main():
     print("\n── TOP 10 EXITS ──")
     print(exits.head(10).to_string(index=False))
 
-    # ── Clustering ─────────────────────────────────────────────────────
-    similarity_df = investor_similarity(df)
     if not similarity_df.empty:
         print("\n── INVESTOR SIMILARITY (top pairs) ──")
         print(similarity_df.head(15).to_string(index=False))
 
     # ── Export HTML dashboard ──────────────────────────────────────────
-    export_html(conviction, new_buys, exits, sector_pref, similarity_df, df, top10, filename=output_html)
+    export_html(
+        conviction, new_buys, exits, sector_pref,
+        similarity_df, df, top10,
+        filename=output_html,
+    )
 
     elapsed = (datetime.now() - start_time).seconds
     print(f"\n{'='*60}")
@@ -567,7 +720,10 @@ if __name__ == "__main__":
     # ── Optional: load from JSON cache to skip re-scraping ────────────
     # Set USE_CACHE = True to reload from superstar_raw.json
     # and regenerate the HTML without scraping again.
+    # NOTE: cache mode cannot re-run fundamentals (no browser) —
+    # it skips pick_top10 and shows top10 as empty in that case.
     USE_CACHE = False
+
     if USE_CACHE and os.path.exists(OUTPUT_JSON):
         print(f"[CACHE] Loading from {OUTPUT_JSON}...")
         output_html = datetime.now().strftime("%d%b%Y_%H%M") + "_Report.html"
@@ -575,8 +731,9 @@ if __name__ == "__main__":
             all_holdings = json.load(f)
         df            = build_master_df(all_holdings)
         conviction, new_buys, exits, sector_pref = analyze(df)
-        top10         = pick_top10(conviction, new_buys, exits, df)
         similarity_df = investor_similarity(df)
+        top10         = pd.DataFrame()   # fundamentals need live browser
+        print("[INFO] Cache mode: Top 10 skipped (needs live browser for D/E + promoter checks)")
         export_html(conviction, new_buys, exits, sector_pref, similarity_df, df, top10, filename=output_html)
         print(f"  -> Report saved: {output_html}")
     else:
